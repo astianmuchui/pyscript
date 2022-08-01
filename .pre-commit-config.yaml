@@ -25,12 +25,13 @@ repos:
     hooks:
     -   id: bandit
         args:
-        -   --skip=B201
+        -   --skip=B101,B201
 
 -   repo: https://github.com/psf/black
     rev: 22.6.0
     hooks:
     -   id: black
+
 
 -   repo: https://github.com/codespell-project/codespell
     rev: v2.1.0
@@ -58,7 +59,7 @@ repos:
         exclude: .github/ISSUE_TEMPLATE/.*\.yml$
 
 -   repo: https://github.com/asottile/pyupgrade
-    rev: v2.37.1
+    rev: v2.37.2
     hooks:
     -   id: pyupgrade
         args:
