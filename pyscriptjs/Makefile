@@ -2,14 +2,15 @@ tag := latest
 git_hash ?= $(shell git log -1 --pretty=format:%h)
 
 base_dir ?= $(shell git rev-parse --show-toplevel)
-src_dir ?= $(base_dir)/src
+src_dir ?= $(base_dir)/pyscriptjs/src
 examples ?=  ../$(base_dir)/examples
 app_dir ?= $(shell git rev-parse --show-prefix)
 
 CONDA_EXE := conda
-CONDA_ENV ?= ./env
+CONDA_ENV ?= $(base_dir)/pyscriptjs/env
 env := $(CONDA_ENV)
 conda_run := $(CONDA_EXE) run -p $(env)
+PYTEST_EXE := $(CONDA_ENV)/bin/pytest
 GOOD_NODE_VER := 14
 GOOD_NPM_VER := 6
 NODE_VER    := $(shell node -v | cut -d. -f1 | sed 's/^v\(.*\)/\1/')
@@ -68,20 +69,21 @@ examples:
 test:
 	make examples
 	npm run build
-	$(conda_run) pytest -vv $(ARGS) tests/ --log-cli-level=warning
+	make test-ts
+	make test-py
 
 test-local:
 	make examples
 	npm run build
-	pytest -vvs $(ARGS) tests/ --log-cli-level=warning
+	pytest -vvs $(ARGS) tests/integration/ --log-cli-level=warning
 
 test-py:
-	@echo "Tests are coming :( this is a placeholder and it's meant to fail!"
-	$(conda_run) pytest -vv $(ARGS) tests/ --log-cli-level=warning
+	@echo "Tests from $(src_dir)"
+	$(PYTEST_EXE) -vv $(ARGS) tests/py-unit/ --log-cli-level=warning
 
 test-ts:
 	@echo "Tests are coming :( this is a placeholder and it's meant to fail!"
-	npm run tests
+	npm run test
 
 fmt: fmt-py fmt-ts
 	@echo "Format completed"
