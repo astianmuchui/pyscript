@@ -65,17 +65,24 @@ examples:
 	find ./examples/toga -type f -name '*.html' -exec sed $(SED_I_ARG) s+https://pyscript.net/latest/+../../build/+g {} \;
 	find ./examples/webgl -type f -name '*.html' -exec sed $(SED_I_ARG) s+https://pyscript.net/latest/+../../../build/+g {} \;
 	find ./examples -type f -name '*.html' -exec sed $(SED_I_ARG) s+https://pyscript.net/latest/+../build/+g {} \;
+	npm run build
+	cp -R ./build/ ./examples/build
+	@echo "To serve examples run: $(conda_run) python -m http.server 8080 --directory examples"
+
+# run prerequisites and serve pyscript examples at http://localhost:8000/examples/
+run-examples: setup build examples
+	make examples
+	npm install
+	make dev
 
 test:
 	make examples
-	npm run build
 	make test-ts
 	make test-py
 
-test-local:
+test-integration:
 	make examples
-	npm run build
-	pytest -vvs $(ARGS) tests/integration/ --log-cli-level=warning
+	$(PYTEST_EXE) -vv $(ARGS) tests/integration/ --log-cli-level=warning
 
 test-py:
 	@echo "Tests from $(src_dir)"

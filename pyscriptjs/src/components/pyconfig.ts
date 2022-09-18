@@ -1,163 +1,85 @@
-import * as jsyaml from 'js-yaml';
 import { BaseEvalElement } from './base';
-import {
-    initializers,
-    loadedEnvironments,
-    postInitializers,
-    pyodideLoaded,
-    scriptsQueue,
-    globalLoader,
-    appConfig,
-    Initializer,
-} from '../stores';
-import { loadInterpreter } from '../interpreter';
-import type { PyLoader } from './pyloader';
-import type { PyScript } from './pyscript';
-import type { PyodideInterface } from '../pyodide';
+import { appConfig, addInitializer, runtimeLoaded } from '../stores';
+import type { AppConfig, Runtime } from '../runtime';
+import { version } from '../runtime';
+import { PyodideRuntime } from '../pyodide';
+import { getLogger } from '../logger';
+import { readTextFromPath, handleFetchError, mergeConfig, validateConfig, defaultConfig } from '../utils'
 
-const DEFAULT_RUNTIME = {
-    src: 'https://cdn.jsdelivr.net/pyodide/v0.20.0/full/pyodide.js',
-    name: 'pyodide-default',
-    lang: 'python',
-};
-
-export type Runtime = {
-    src: string;
-    name?: string;
-    lang?: string;
-};
-
-export type AppConfig = {
-    autoclose_loader: boolean;
-    name?: string;
-    version?: string;
-    runtimes?: Array<Runtime>;
-};
-
-let appConfig_: AppConfig = {
-    autoclose_loader: true,
-};
-
-appConfig.subscribe((value: AppConfig) => {
-    if (value) {
-        appConfig_ = value;
-    }
-    console.log('config set!');
+// Subscriber used to connect to the first available runtime (can be pyodide or others)
+let runtimeSpec: Runtime;
+runtimeLoaded.subscribe(value => {
+    runtimeSpec = value;
 });
 
-let initializers_: Initializer[];
-initializers.subscribe((value: Initializer[]) => {
-    initializers_ = value;
-    console.log('initializers set');
+let appConfig_: AppConfig;
+appConfig.subscribe(value => {
+    appConfig_ = value;
 });
 
-let postInitializers_: Initializer[];
-postInitializers.subscribe((value: Initializer[]) => {
-    postInitializers_ = value;
-    console.log('post initializers set');
-});
+const logger = getLogger('py-config');
 
-let scriptsQueue_: PyScript[];
-scriptsQueue.subscribe((value: PyScript[]) => {
-    scriptsQueue_ = value;
-    console.log('post initializers set');
-});
-
-let loader: PyLoader | undefined;
-globalLoader.subscribe(value => {
-    loader = value;
-});
-
-export class PyodideRuntime extends Object {
-    src: string;
-
-    constructor(url: string) {
-        super();
-        this.src = url;
-    }
-
-    async initialize() {
-        loader?.log('Loading runtime...');
-        const pyodide: PyodideInterface = await loadInterpreter(this.src);
-        const newEnv = {
-            id: 'a',
-            runtime: pyodide,
-            state: 'loading',
-        };
-        pyodideLoaded.set(pyodide);
-
-        // Inject the loader into the runtime namespace
-        // eslint-disable-next-line
-        pyodide.globals.set('pyscript_loader', loader);
-
-        loader?.log('Runtime created...');
-        loadedEnvironments.update(environments => ({
-            ...environments,
-            [newEnv['id']]: newEnv,
-        }));
-
-        // now we call all initializers before we actually executed all page scripts
-        loader?.log('Initializing components...');
-        for (const initializer of initializers_) {
-            await initializer();
-        }
-
-        loader?.log('Initializing scripts...');
-        for (const script of scriptsQueue_) {
-            await script.evaluate();
-        }
-        scriptsQueue.set([]);
-
-        // now we call all post initializers AFTER we actually executed all page scripts
-        loader?.log('Running post initializers...');
-
-        if (appConfig_ && appConfig_.autoclose_loader) {
-            loader?.close();
-            console.log('------ loader closed ------');
-        }
-
-        for (const initializer of postInitializers_) {
-            await initializer();
-        }
-        console.log('===PyScript page fully initialized===');
-    }
-}
+/**
+ * Configures general metadata about the PyScript application such
+ * as a list of runtimes, name, version, closing the loader
+ * automatically, etc.
+ *
+ * Also initializes the different runtimes passed. If no runtime is passed,
+ * the default runtime based on Pyodide is used.
+ */
 
 export class PyConfig extends BaseEvalElement {
-    shadow: ShadowRoot;
-    wrapper: HTMLElement;
-    theme: string;
     widths: Array<string>;
     label: string;
     mount_name: string;
     details: HTMLElement;
     operation: HTMLElement;
-    code: string;
     values: AppConfig;
     constructor() {
         super();
     }
 
+    extractFromSrc() {
+        if (this.hasAttribute('src'))
+        {
+            logger.info('config set from src attribute');
+            return validateConfig(readTextFromPath(this.getAttribute('src')));
+        }
+        return {};
+    }
+
+    extractFromInline() {
+        if (this.innerHTML!=='')
+        {
+            this.code = this.innerHTML;
+            this.innerHTML = '';
+            logger.info('config set from inline');
+            return validateConfig(this.code);
+        }
+        return {};
+    }
+
+    injectMetadata() {
+        this.values.pyscript = {
+            "version": version,
+            "time": new Date().toISOString()
+        };
+    }
+
     connectedCallback() {
-        this.code = this.innerHTML;
-        this.innerHTML = '';
+        let srcConfig = this.extractFromSrc();
+        const inlineConfig = this.extractFromInline();
+        // first make config from src whole if it is partial
+        srcConfig = mergeConfig(srcConfig, defaultConfig);
+        // then merge inline config and config from src
+        this.values = mergeConfig(inlineConfig, srcConfig);
+        this.injectMetadata();
 
-        const loadedValues = jsyaml.load(this.code);
-        if (loadedValues === undefined) {
-            this.values = {
-                autoclose_loader: true,
-            };
-        } else {
-            // eslint-disable-next-line
-            // @ts-ignore
-            this.values = loadedValues;
-        }
-        if (this.values.runtimes === undefined) {
-            this.values.runtimes = [DEFAULT_RUNTIME];
-        }
         appConfig.set(this.values);
-        console.log('config set', this.values);
+        logger.info('config set:', this.values);
 
+        addInitializer(this.loadPackages);
+        addInitializer(this.loadPaths);
         this.loadRuntimes();
     }
 
@@ -171,14 +93,35 @@ export class PyConfig extends BaseEvalElement {
         this.remove();
     }
 
+    loadPackages = async () => {
+        const env = appConfig_.packages;
+        logger.info("Loading env: ", env);
+        await runtimeSpec.installPackage(env);
+    }
+
+    loadPaths = async () => {
+        const paths = appConfig_.paths;
+        logger.info("Paths to load: ", paths)
+        for (const singleFile of paths) {
+            logger.info(`  loading path: ${singleFile}`);
+            try {
+                await runtimeSpec.loadFromFile(singleFile);
+            } catch (e) {
+                //Should we still export full error contents to console?
+                handleFetchError(<Error>e, singleFile);
+            }
+        }
+        logger.info("All paths loaded");
+    }
+
     loadRuntimes() {
-        console.log('Initializing runtimes...');
+        logger.info('Initializing runtimes');
         for (const runtime of this.values.runtimes) {
+            const runtimeObj: Runtime = new PyodideRuntime(runtime.src, runtime.name, runtime.lang);
             const script = document.createElement('script'); // create a script DOM node
-            const runtimeSpec = new PyodideRuntime(runtime.src);
-            script.src = runtime.src;  // set its src to the provided URL
+            script.src = runtimeObj.src; // set its src to the provided URL
             script.addEventListener('load', () => {
-                void runtimeSpec.initialize();
+                void runtimeObj.initialize();
             });
             document.head.appendChild(script);
         }
