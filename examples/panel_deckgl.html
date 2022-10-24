@@ -42,13 +42,6 @@
     <script defer src="https://pyscript.net/latest/pyscript.js"></script>
   </head>
 
-  <py-env>
-    - bokeh
-    - numpy
-    - pandas
-    - panel==0.13.1
-  </py-env>
-
   <body>
     <div class="container-fluid d-flex flex-column vh-100 overflow-hidden" id="container">
       <nav class="navbar navbar-expand-md navbar-dark sticky-top shadow" id="header" style="background-color: #000000;">
@@ -75,6 +68,15 @@
 	</div>
       </div>
     </div>
+
+    <py-config>
+      packages = [
+        "bokeh",
+        "numpy",
+        "pandas",
+        "panel==0.13.1"
+      ]
+    </py-config>
 
     <py-script>
       import panel as pn

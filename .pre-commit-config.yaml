@@ -28,13 +28,13 @@ repos:
         -   --skip=B101,B201
 
 -   repo: https://github.com/psf/black
-    rev: 22.8.0
+    rev: 22.10.0
     hooks:
     -   id: black
 
 
 -   repo: https://github.com/codespell-project/codespell
-    rev: v2.2.1
+    rev: v2.2.2
     hooks:
     -   id: codespell  # See 'setup.cfg' for args
 
@@ -59,24 +59,23 @@ repos:
         exclude: .github/ISSUE_TEMPLATE/.*\.yml$
 
 -   repo: https://github.com/asottile/pyupgrade
-    rev: v2.37.3
+    rev: v3.1.0
     hooks:
     -   id: pyupgrade
         args:
         -   --py310-plus
 
 -   repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v8.23.1
+    rev: v8.25.0
     hooks:
     -   id: eslint
         files: pyscriptjs/src/.*\.[jt]sx?$  # *.js, *.jsx, *.ts and *.tsx
         types: [file]
         additional_dependencies:
-        -   eslint
-        -   eslint-plugin-svelte3
-        -   typescript
-        -   '@typescript-eslint/eslint-plugin'
-        -   '@typescript-eslint/parser'
+        -   eslint@8.25.0
+        -   typescript@4.8.4
+        -   '@typescript-eslint/eslint-plugin@5.39.0'
+        -   '@typescript-eslint/parser@5.39.0'
 
 # Commented out until mdformat-myst supports custom extensions
 # See https://github.com/executablebooks/mdformat-myst/pull/9

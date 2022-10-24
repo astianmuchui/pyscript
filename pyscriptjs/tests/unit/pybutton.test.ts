@@ -1,27 +1,21 @@
 import { jest } from '@jest/globals';
-import { PyButton } from '../../src/components/pybutton';
+import type { Runtime } from "../../src/runtime"
+import { FakeRuntime } from "./fakeruntime"
+import { make_PyButton } from '../../src/components/pybutton';
+import { ensureUniqueId } from '../../src/utils';
 
+const runtime: Runtime = new FakeRuntime();
+const PyButton = make_PyButton(runtime);
 customElements.define('py-button', PyButton);
 
 describe('PyButton', () => {
-    let instance: PyButton;
+    let instance;
     beforeEach(() => {
         instance = new PyButton();
-        instance.runAfterRuntimeInitialized = jest.fn();
     });
 
     it('should get the Button to just instantiate', async () => {
         expect(instance).toBeInstanceOf(PyButton);
-    });
-
-    it('confirm that  runAfterRuntimeInitialized is called', async () => {
-        const mockedRunAfterRuntimeInitialized = jest
-            .spyOn(instance, 'runAfterRuntimeInitialized')
-            .mockImplementation(jest.fn());
-
-        instance.connectedCallback();
-
-        expect(mockedRunAfterRuntimeInitialized).toHaveBeenCalled();
     });
 
     it('onCallback gets or sets a new id', async () => {
@@ -32,8 +26,8 @@ describe('PyButton', () => {
         // id should be similar to py-4850c8c3-d70d-d9e0-03c1-3cfeb0bcec0d-container
         expect(instanceId).toMatch(/py-(\w+-){1,5}container/);
 
-        // calling checkId directly should return the same id
-        instance.checkId();
+        // ensureUniqueId doesn't change the ID
+        ensureUniqueId(instance);
         expect(instance.id).toEqual(instanceId);
     });
 

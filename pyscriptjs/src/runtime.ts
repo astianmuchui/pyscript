@@ -1,17 +1,5 @@
+import type { AppConfig } from './pyconfig';
 import type { PyodideInterface } from 'pyodide';
-import type { PyLoader } from './components/pyloader';
-import {
-    runtimeLoaded,
-    loadedEnvironments,
-    globalLoader,
-    initializers,
-    postInitializers,
-    Initializer,
-    scriptsQueue,
-    appConfig,
-} from './stores';
-import { createCustomElements } from './components/elements';
-import type { PyScript } from './components/pyscript';
 import { getLogger } from './logger';
 
 const logger = getLogger('pyscript/runtime');
@@ -19,63 +7,7 @@ const logger = getLogger('pyscript/runtime');
 export const version = "<<VERSION>>";
 export type RuntimeInterpreter = PyodideInterface | null;
 
-export interface AppConfig extends Record<string, any> {
-    name?: string;
-    description?: string;
-    version?: string;
-    schema_version?: number;
-    type?: string;
-    author_name?: string;
-    author_email?: string;
-    license?: string;
-    autoclose_loader?: boolean;
-    runtimes?: Array<RuntimeConfig>;
-    packages?: Array<string>;
-    paths?: Array<string>;
-    plugins?: Array<string>;
-    pyscript?: PyScriptMetadata;
-}
 
-export type PyScriptMetadata = {
-    version?: string;
-    time?: string;
-}
-
-export type RuntimeConfig = {
-    src?: string;
-    name?: string;
-    lang?: string;
-};
-
-let loader: PyLoader | undefined;
-globalLoader.subscribe(value => {
-    loader = value;
-});
-
-let initializers_: Initializer[];
-initializers.subscribe((value: Initializer[]) => {
-    initializers_ = value;
-});
-
-let postInitializers_: Initializer[];
-postInitializers.subscribe((value: Initializer[]) => {
-    postInitializers_ = value;
-});
-
-let scriptsQueue_: PyScript[];
-scriptsQueue.subscribe((value: PyScript[]) => {
-    scriptsQueue_ = value;
-});
-
-let appConfig_: AppConfig = {
-    autoclose_loader: true
-};
-
-appConfig.subscribe((value: AppConfig) => {
-    if (value) {
-        appConfig_ = value;
-    }
-});
 
 /*
 Runtime class is a super class that all different runtimes must respect
@@ -95,6 +27,7 @@ For an example implementation, refer to the `PyodideRuntime` class
 in `pyodide.ts`
 */
 export abstract class Runtime extends Object {
+    config: AppConfig;
     abstract src: string;
     abstract name?: string;
     abstract lang?: string;
@@ -103,6 +36,11 @@ export abstract class Runtime extends Object {
      * global symbols table for the underlying interpreter.
      * */
     abstract globals: any;
+
+    constructor(config: AppConfig) {
+        super();
+        this.config = config;
+    }
 
     /**
      * loads the interpreter for the runtime and saves an instance of it
@@ -114,8 +52,22 @@ export abstract class Runtime extends Object {
     /**
      * delegates the code to be run to the underlying interpreter
      * (asynchronously) which can call its own API behind the scenes.
+     * Python exceptions are turned into JS exceptions.
      * */
     abstract run(code: string): Promise<any>;
+
+    /**
+     * Same as run, but Python exceptions are not propagated: instead, they
+     * are logged to the console.
+     *
+     * This is a bad API and should be killed/refactored/changed eventually,
+     * but for now we have code which relies on it.
+     * */
+    async runButDontRaise(code: string): Promise<any> {
+        return this.run(code).catch(err => {
+            logger.error(err);
+        });
+    }
 
     /**
      * delegates the setting of JS objects to
@@ -143,60 +95,4 @@ export abstract class Runtime extends Object {
      * underlying interpreter.
      * */
     abstract loadFromFile(path: string): Promise<void>;
-
-    /**
-     * initializes the page which involves loading of runtime,
-     * as well as evaluating all the code inside <py-script> tags
-     * along with initializers and postInitializers
-     * */
-    async initialize(): Promise<void> {
-        loader?.log('Loading runtime...');
-        await this.loadInterpreter();
-        const newEnv = {
-            id: 'default',
-            runtime: this,
-            state: 'loading',
-        };
-        runtimeLoaded.set(this);
-
-        // Inject the loader into the runtime namespace
-        // eslint-disable-next-line
-        this.globals.set('pyscript_loader', loader);
-
-        loader?.log('Runtime created...');
-        loadedEnvironments.update(environments => ({
-            ...environments,
-            [newEnv['id']]: newEnv,
-        }));
-
-        // now we call all initializers before we actually executed all page scripts
-        loader?.log('Initializing components...');
-        for (const initializer of initializers_) {
-            await initializer();
-        }
-
-        loader?.log('Initializing scripts...');
-        for (const script of scriptsQueue_) {
-            await script.evaluate();
-        }
-        scriptsQueue.set([]);
-
-        // now we call all post initializers AFTER we actually executed all page scripts
-        loader?.log('Running post initializers...');
-
-        // Finally create the custom elements for pyscript such as pybutton
-        createCustomElements();
-
-        if (appConfig_ && appConfig_.autoclose_loader) {
-            loader?.close();
-        }
-
-        for (const initializer of postInitializers_) {
-            await initializer();
-        }
-        // NOTE: this message is used by integration tests to know that
-        // pyscript initialization has complete. If you change it, you need to
-        // change it also in tests/integration/support.py
-        logger.info('PyScript page fully initialized');
-    }
 }

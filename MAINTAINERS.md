@@ -12,7 +12,9 @@ This document lists the Maintainers of the Project. Maintainers may be added onc
 | Mariana Meireles     | Anaconda, Inc    |
 | Nicholas H.Tollervey | Anaconda, Inc    |
 | Madhur Tandon        | Anaconda, Inc    |
-| ---                  | ---              |
+| Ted Patrick          | Anaconda, Inc    |
+| Jeff Glass           | ---              |
+| Paul Everitt         | ---              |
 
 ______________________________________________________________________
 

@@ -1,10 +1,5 @@
 # PyScript
 
-```{warning}
-Please note, this documentation is just a placeholder and **should not be used
-in reference material**. Thank you!
-```
-
 Welcome to the PyScript documentation!
 
 PyScript provides a way for you to run Python code directly in your browser, giving
@@ -27,6 +22,7 @@ Check out our [getting started guide](tutorials/getting-started.md)!
 You already know the basics and want to learn specifics!
 
 [Passing Objects between JavaScript and Python](howtos/passing-objects.md)
+[Making async HTTP requests in pure Python](howtos/http-requests.md)
 
 :::
 :::{grid-item-card} [Concepts](concepts/index.md)
@@ -37,6 +33,8 @@ You already know the basics and want to learn specifics!
 :::{grid-item-card} [Reference](reference/index.md)
 
 [Frequently asked questions](reference/faq.md)
+
+[The PyScript JS Module](reference/pyscript-module.md)
 
 :::{toctree}
 :maxdepth: 1

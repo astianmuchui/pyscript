@@ -1,9 +1,14 @@
 import pdb
 import re
+import sys
 import time
+import traceback
+import urllib
+from dataclasses import dataclass
 
 import py
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 
 ROOT = py.path.local(__file__).dirpath("..", "..", "..")
 BUILD = ROOT.join("pyscriptjs", "build")
@@ -43,18 +48,17 @@ class PyScriptTest:
     PY_COMPLETE = "Python initialization complete"
 
     @pytest.fixture()
-    def init(self, request, tmpdir, http_server, logger, page):
+    def init(self, request, tmpdir, logger, page):
         """
         Fixture to automatically initialize all the tests in this class and its
         subclasses.
 
-        The magic is done by the decorator @pyest.mark.usefixtures("init"),
+        The magic is done by the decorator @pytest.mark.usefixtures("init"),
         which tells pytest to automatically use this fixture for all the test
         method of this class.
 
         Using the standard pytest behavior, we can request more fixtures:
-        tmpdir, http_server and page; 'page' is a fixture provided by
-        pytest-playwright.
+        tmpdir, and page; 'page' is a fixture provided by pytest-playwright.
 
         Then, we save these fixtures on the self and proceed with more
         initialization. The end result is that the requested fixtures are
@@ -65,8 +69,20 @@ class PyScriptTest:
         # create a symlink to BUILD inside tmpdir
         tmpdir.join("build").mksymlinkto(BUILD)
         self.tmpdir.chdir()
-        self.http_server = http_server
         self.logger = logger
+
+        if request.config.option.no_fake_server:
+            # use a real HTTP server. Note that as soon as we request the
+            # fixture, the server automatically starts in its own thread.
+            self.http_server = request.getfixturevalue("http_server")
+        else:
+            # use the internal playwright routing
+            self.http_server = "http://fake_server"
+            self.router = SmartRouter(
+                "fake_server", logger=logger, usepdb=request.config.option.usepdb
+            )
+            self.router.install(page)
+        #
         self.init_page(page)
         #
         # this extra print is useful when using pytest -s, else we start printing
@@ -92,6 +108,10 @@ class PyScriptTest:
 
     def init_page(self, page):
         self.page = page
+
+        # set default timeout to 60000 millliseconds from 30000
+        page.set_default_timeout(60000)
+
         self.console = ConsoleMessageCollection(self.logger)
         self._page_errors = []
         page.on("console", self.console.add_message)
@@ -146,7 +166,7 @@ class PyScriptTest:
         self.logger.reset()
         self.logger.log("page.goto", path, color="yellow")
         url = f"{self.http_server}/{path}"
-        self.page.goto(url)
+        self.page.goto(url, timeout=0)
 
     def wait_for_console(self, text, *, timeout=None, check_errors=True):
         """
@@ -187,7 +207,7 @@ class PyScriptTest:
         """
         # this is printed by runtime.ts:Runtime.initialize
         self.wait_for_console(
-            "[pyscript/runtime] PyScript page fully initialized",
+            "[pyscript/main] PyScript page fully initialized",
             timeout=timeout,
             check_errors=check_errors,
         )
@@ -195,7 +215,7 @@ class PyScriptTest:
         # events aren't being triggered in the tests.
         self.page.wait_for_timeout(100)
 
-    def pyscript_run(self, snippet, *, extra_head=""):
+    def pyscript_run(self, snippet, *, extra_head="", wait_for_pyscript=True):
         """
         Main entry point for pyscript tests.
 
@@ -224,7 +244,8 @@ class PyScriptTest:
         filename = f"{self.testname}.html"
         self.writefile(filename, doc)
         self.goto(filename)
-        self.wait_for_pyscript()
+        if wait_for_pyscript:
+            self.wait_for_pyscript()
 
 
 # ============== Helpers and utility functions ==============
@@ -410,3 +431,125 @@ class Color:
         start = f"\x1b[{color}m"
         end = "\x1b[00m"
         return start, end
+
+
+class SmartRouter:
+    """
+    A smart router to be used in conjunction with playwright.Page.route.
+
+    Main features:
+
+      - it intercepts the requests to a local "fake server" and serve them
+        statically from disk
+
+      - it intercepts the requests to the network and cache the results
+        locally
+    """
+
+    @dataclass
+    class CachedResponse:
+        """
+        We cannot put playwright's APIResponse instances inside _cache, because
+        they are valid only in the context of the same page. As a workaround,
+        we manually save status, headers and body of each cached response.
+        """
+
+        status: int
+        headers: dict
+        body: str
+
+    # NOTE: this is a class attribute, which means that the cache is
+    # automatically shared between all instances of Fake_Server (and thus all
+    # tests of the pytest session)
+    _cache = {}
+
+    def __init__(self, fake_server, *, logger, usepdb=False):
+        """
+        fake_server: the domain name of the fake server
+        """
+        self.fake_server = fake_server
+        self.logger = logger
+        self.usepdb = usepdb
+        self.page = None
+
+    def install(self, page):
+        """
+        Install the smart router on a page
+        """
+        self.page = page
+        self.page.route("**", self.router)
+
+    def router(self, route):
+        """
+        Intercept and fulfill playwright requests.
+
+        NOTE!
+        If we raise an exception inside router, playwright just hangs and the
+        exception seems not to be propagated outside. It's very likely a
+        playwright bug.
+
+        This means that for example pytest doesn't have any chance to
+        intercept the exception and fail in a meaningful way.
+
+        As a workaround, we try to intercept exceptions by ourselves, print
+        something reasonable on the console and abort the request (hoping that
+        the test will fail cleaninly, that's the best we can do). We also try
+        to respect pytest --pdb, for what it's possible.
+        """
+        try:
+            return self._router(route)
+        except Exception:
+            print("***** Error inside Fake_Server.router *****")
+            info = sys.exc_info()
+            print(traceback.format_exc())
+            if self.usepdb:
+                pdb.post_mortem(info[2])
+            route.abort()
+
+    def log_request(self, status, kind, url):
+        color = "blue" if status == 200 else "red"
+        self.logger.log("request", f"{status} - {kind} - {url}", color=color)
+
+    def _router(self, route):
+        full_url = route.request.url
+        url = urllib.parse.urlparse(full_url)
+        assert url.scheme in ("http", "https")
+
+        # requests to http://fake_server/ are served from the current dir and
+        # never cached
+        if url.netloc == self.fake_server:
+            self.log_request(200, "fake_server", full_url)
+            assert url.path[0] == "/"
+            relative_path = url.path[1:]
+            route.fulfill(status=200, path=relative_path)
+            return
+
+        # network requests might be cached
+        if full_url in self._cache:
+            kind = "CACHED"
+            resp = self._cache[full_url]
+        else:
+            kind = "NETWORK"
+            resp = self.fetch_from_network(route.request)
+            self._cache[full_url] = resp
+
+        self.log_request(resp.status, kind, full_url)
+        route.fulfill(status=resp.status, headers=resp.headers, body=resp.body)
+
+    def fetch_from_network(self, request):
+        # sometimes the network is flaky and if the first request doesn't
+        # work, a subsequent one works. Instead of giving up immediately,
+        # let's try twice
+        try:
+            api_response = self.page.request.fetch(request)
+        except PlaywrightError:
+            # sleep a bit and try again
+            time.sleep(0.5)
+            api_response = self.page.request.fetch(request)
+
+        cached_response = self.CachedResponse(
+            status=api_response.status,
+            headers=api_response.headers,
+            body=api_response.body(),
+        )
+        return cached_response
