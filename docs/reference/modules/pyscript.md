@@ -4,35 +4,46 @@ The code underlying PyScript is a TypeScript/JavaScript module, which is loaded 
 
 The module is exported to the browser as `pyscript`. The exports from this module are:
 
-## pyscript.runtime
+## pyscript.version
 
-The RunTime object which is responsible for executing Python code in the Browser. Currently, all runtimes are assumed to be Pyodide runtimes, but there is flexibility to expand this to other web-based Python runtimes in future versions.
+Once `pyscript.js` has loaded, the version of PyScript that is currently running can be accessed via `pyscript.version`.
+```html
+<script defer onload="console.log(`${pyscript.version}`)" src="https://pyscript.net/latest/pyscript.js"></script>
+```
+```js
+//example result
+Object { year: 2022, month: 11, patch: 1, releaselevel: "dev" }
+```
 
-The RunTime object has the following attributes
+## pyscript.interpreter
 
-| attribute           | type                | description                                                                 |
-|---------------------|---------------------|-----------------------------------------------------------------------------|
-| **src**             | string              | The URL from which the current runtime was fetched                          |
-| **interpreter**     | RuntimeInterpretter | A reference to the runtime object itself                                    |
-| **globals**         | any                 | The globals dictionary of the runtime, if applicable/accessible             |
-| **name (optional)** | string              | A user-designated name for the runtime                                      |
-| **lang (optional)** | string              | A user-designation for the language the runtime runs ('Python', 'C++', etc) |
+The Interpreter object which is responsible for executing Python code in the Browser. Currently, all interpreters are assumed to be Pyodide interpreters, but there is flexibility to expand this to other web-based Python interpreters in future versions.
 
-### pyscript.runtime.src
+The Interpreter object has the following attributes
 
-The URL from which the current runtime was fetched.
+| attribute           | type                  | description                                                                     |
+|---------------------|-----------------------|---------------------------------------------------------------------------------|
+| **src**             | string                | The URL from which the current interpreter was fetched                          |
+| **interface**       | InterpreterInterface  | A reference to the interpreter object itself                                    |
+| **globals**         | any                   | The globals dictionary of the interpreter, if applicable/accessible             |
+| **name (optional)** | string                | A user-designated name for the interpreter                                      |
+| **lang (optional)** | string                | A user-designation for the language the interpreter runs ('Python', 'C++', etc) |
 
-### pyscript.runtime.interpreter
+### pyscript.interpreter.src
 
-A reference to the Runtime wrapper that PyScript uses to execute code. object itself. This allows other frameworks, modules etc to interact with the same [(Pyodide) runtime instance](https://pyodide.org/en/stable/usage/api/js-api.html) that PyScript uses.
+The URL from which the current interpreter was fetched.
 
-For example, assuming we've loaded Pyodide, we can access the methods of the Pyodide runtime as follows:
+### pyscript.interpreter.interface
+
+A reference to the Interpreter wrapper that PyScript uses to execute code. object itself. This allows other frameworks, modules etc to interact with the same [(Pyodide) interpreter instance](https://pyodide.org/en/stable/usage/api/js-api.html) that PyScript uses.
+
+For example, assuming we've loaded Pyodide, we can access the methods of the Pyodide interpreter as follows:
 
 ```html
 <button onclick="logFromPython()">Click Me to Run Some Python</button>
 <script>
     function logFromPython(){
-        pyscript.runtime.interpreter.runPython(`
+        pyscript.interpreter.interface.runPython(`
             animal = "Python"
             sound = "sss"
             console.warn(f"{animal}s go " + sound * 5)
@@ -41,9 +52,9 @@ For example, assuming we've loaded Pyodide, we can access the methods of the Pyo
 </script>
 ```
 
-### pyscript.runtime.globals
+### pyscript.interpreter.globals
 
-A proxy for the runtime's `globals()` dictionary. For example:
+A proxy for the interpreter's `globals()` dictionary. For example:
 
 ```html
 <body>
@@ -52,15 +63,15 @@ A proxy for the runtime's `globals()` dictionary. For example:
     <button onclick="showX()">Click Me to Get 'x' from Python</button>
     <script>
         function showX(){
-            console.log(`In Python right now, x = ${PyScript.runtime.globals.get('x')}`)
+            console.log(`In Python right now, x = ${pyscript.interpreter.globals.get('x')}`)
         }
     </script>
 </body>
 ```
-### pyscript.runtime.name
+### pyscript.interpreter.name
 
-A user-supplied string for the runtime given at its creation. For user reference only - does not affect the operation of the runtime or PyScript.
+A user-supplied string for the interpreter given at its creation. For user reference only - does not affect the operation of the interpreter or PyScript.
 
-### PyScript.runtime.lang
+### PyScript.interpreter.lang
 
-A user-supplied string for the language the runtime uses given at its creation. For user reference only - does not affect the operation of the runtime or PyScript.
+A user-supplied string for the language the interpreter uses given at its creation. For user reference only - does not affect the operation of the interpreter or PyScript.

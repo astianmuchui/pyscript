@@ -58,6 +58,14 @@ dev:
 build:
 	npm run build
 
+build-fast:
+	node esbuild.mjs
+
+# use the following rule to do all the checks done by precommit: in
+# particular, use this if you want to run eslint.
+precommit-check:
+	pre-commit run --all-files
+
 examples:
 	mkdir -p ./examples
 	cp -r ../examples/* ./examples
@@ -81,21 +89,24 @@ test:
 	make examples
 	make test-ts
 	make test-py
+	make test-integration-parallel
 
 test-integration:
 	make examples
-	$(PYTEST_EXE) -vv $(ARGS) tests/integration/ --log-cli-level=warning
+	mkdir -p test_results
+	$(PYTEST_EXE) -vv $(ARGS) tests/integration/ --log-cli-level=warning --junitxml=test_results/integration.xml
 
 test-integration-parallel:
 	make examples
-	$(PYTEST_EXE) --numprocesses auto -vv $(ARGS) tests/integration/ --log-cli-level=warning
+	mkdir -p test_results
+	$(PYTEST_EXE) --numprocesses auto -vv $(ARGS) tests/integration/ --log-cli-level=warning --junitxml=test_results/integration.xml
 
 test-py:
 	@echo "Tests from $(src_dir)"
-	$(PYTEST_EXE) -vv $(ARGS) tests/py-unit/ --log-cli-level=warning
+	mkdir -p test_results
+	$(PYTEST_EXE) -vv $(ARGS) tests/py-unit/ --log-cli-level=warning --junitxml=test_results/py-unit.xml
 
 test-ts:
-	@echo "Tests are coming :( this is a placeholder and it's meant to fail!"
 	npm run test
 
 fmt: fmt-py fmt-ts

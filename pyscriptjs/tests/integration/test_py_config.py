@@ -1,27 +1,32 @@
 import os
 import tarfile
 import tempfile
+from pathlib import Path
 
 import pytest
 import requests
 
-from .support import PyScriptTest
-
-URL = "https://github.com/pyodide/pyodide/releases/download/0.20.0/pyodide-build-0.20.0.tar.bz2"
-TAR_NAME = "pyodide-build-0.20.0.tar.bz2"
+from .support import PyScriptTest, with_execution_thread
 
 
 @pytest.fixture
-def tar_location(request):
-    val = request.config.cache.get("pyodide-0.20-tar", None)
+def pyodide_0_22_0_tar(request):
+    """
+    Fixture which returns a local copy of pyodide. It uses pytest-cache to
+    avoid re-downloading it between runs.
+    """
+    URL = "https://github.com/pyodide/pyodide/releases/download/0.22.0/pyodide-core-0.22.0.tar.bz2"
+    tar_name = Path(URL).name
+
+    val = request.config.cache.get(tar_name, None)
     if val is None:
         response = requests.get(URL, stream=True)
         TMP_DIR = tempfile.mkdtemp()
-        TMP_TAR_LOCATION = os.path.join(TMP_DIR, TAR_NAME)
+        TMP_TAR_LOCATION = os.path.join(TMP_DIR, tar_name)
         with open(TMP_TAR_LOCATION, "wb") as f:
             f.write(response.raw.read())
         val = TMP_TAR_LOCATION
-        request.config.cache.set("pyodide-0.20-tar", val)
+        request.config.cache.set(tar_name, val)
     return val
 
 
@@ -30,6 +35,15 @@ def unzip(location, extract_to="."):
     file.extractall(path=extract_to)
 
 
+# Disable the main/worker dual testing, for two reasons:
+#
+#   1. the <py-config> logic happens before we start the worker, so there is
+#      no point in running these tests twice
+#
+#   2. the logic to inject execution_thread into <py-config> works only with
+#      plain <py-config> tags, but here we want to test all weird combinations
+#      of config
+@with_execution_thread(None)
 class TestConfig(PyScriptTest):
     def test_py_config_inline(self):
         self.pyscript_run(
@@ -66,26 +80,22 @@ class TestConfig(PyScriptTest):
         )
         assert self.console.log.lines[-1] == "config name: app with external config"
 
-    # The default pyodide version is 0.21.2 as of writing
+    # The default pyodide version is 0.22.1 as of writing
     # this test which is newer than the one we are loading below
-    # (after downloading locally) -- which is 0.20.0
+    # (after downloading locally) -- which is 0.22.0
 
-    # The test checks if loading a different runtime is possible
+    # The test checks if loading a different interpreter is possible
     # and that too from a locally downloaded file without needing
     # the use of explicit `indexURL` calculation.
-    def test_runtime_config(self, tar_location):
-        unzip(
-            location=tar_location,
-            extract_to=self.tmpdir,
-        )
-
+    def test_interpreter_config(self, pyodide_0_22_0_tar):
+        unzip(pyodide_0_22_0_tar, extract_to=self.tmpdir)
         self.pyscript_run(
             """
             <py-config type="json">
                 {
-                    "runtimes": [{
+                    "interpreters": [{
                         "src": "/pyodide/pyodide.js",
-                        "name": "pyodide-0.20.0",
+                        "name": "my-own-pyodide",
                         "lang": "python"
                     }]
                 }
@@ -100,9 +110,45 @@ class TestConfig(PyScriptTest):
         """,
         )
 
-        assert self.console.log.lines == [self.PY_COMPLETE, "version 0.20.0"]
+        assert self.console.log.lines[-1] == "version 0.22.0"
         version = self.page.locator("py-script").inner_text()
-        assert version == "0.20.0"
+        assert version == "0.22.0"
+
+    def test_runtime_still_works_but_shows_deprecation_warning(
+        self, pyodide_0_22_0_tar
+    ):
+        unzip(pyodide_0_22_0_tar, extract_to=self.tmpdir)
+        self.pyscript_run(
+            """
+            <py-config type="json">
+                {
+                    "runtimes": [{
+                        "src": "/pyodide/pyodide.js",
+                        "name": "my-own-pyodide",
+                        "lang": "python"
+                    }]
+                }
+            </py-config>
+
+            <py-script>
+                import sys, js
+                pyodide_version = sys.modules["pyodide"].__version__
+                js.console.log("version", pyodide_version)
+                display(pyodide_version)
+            </py-script>
+        """,
+        )
+
+        assert self.console.log.lines[-1] == "version 0.22.0"
+        version = self.page.locator("py-script").inner_text()
+        assert version == "0.22.0"
+
+        deprecation_banner = self.page.wait_for_selector(".alert-banner")
+        expected_message = (
+            "The configuration option `config.runtimes` is deprecated. "
+            "Please use `config.interpreters` instead."
+        )
+        assert deprecation_banner.inner_text() == expected_message
 
     def test_invalid_json_config(self):
         # we need wait_for_pyscript=False because we bail out very soon,
@@ -115,8 +161,13 @@ class TestConfig(PyScriptTest):
             """,
             wait_for_pyscript=False,
         )
-        self.page.wait_for_selector(".py-error")
-        self.check_js_errors("Unexpected end of JSON input")
+        banner = self.page.wait_for_selector(".py-error")
+        assert "SyntaxError: Unexpected end of JSON input" in self.console.error.text
+        expected = (
+            "(PY1000): The config supplied: [[ is an invalid JSON and cannot be "
+            "parsed: SyntaxError: Unexpected end of JSON input"
+        )
+        assert banner.inner_text() == expected
 
     def test_invalid_toml_config(self):
         # we need wait_for_pyscript=False because we bail out very soon,
@@ -129,8 +180,14 @@ class TestConfig(PyScriptTest):
             """,
             wait_for_pyscript=False,
         )
-        self.page.wait_for_selector(".py-error")
-        self.check_js_errors("SyntaxError: Expected DoubleQuote")
+        banner = self.page.wait_for_selector(".py-error")
+        assert "SyntaxError: Expected DoubleQuote" in self.console.error.text
+        expected = (
+            "(PY1000): The config supplied: [[ is an invalid TOML and cannot be parsed: "
+            "SyntaxError: Expected DoubleQuote, Whitespace, or [a-z], [A-Z], "
+            '[0-9], "-", "_" but "\\n" found.'
+        )
+        assert banner.inner_text() == expected
 
     def test_multiple_py_config(self):
         self.pyscript_run(
@@ -150,33 +207,35 @@ class TestConfig(PyScriptTest):
             </py-script>
             """
         )
-        div = self.page.wait_for_selector(".py-error")
+        banner = self.page.wait_for_selector(".py-warning")
         expected = (
             "Multiple <py-config> tags detected. Only the first "
             "is going to be parsed, all the others will be ignored"
         )
-        assert div.text_content() == expected
+        assert banner.text_content() == expected
 
-    def test_no_runtimes(self):
+    def test_no_interpreter(self):
         snippet = """
             <py-config type="json">
             {
-                "runtimes": []
+                "interpreters": []
             }
             </py-config>
         """
         self.pyscript_run(snippet, wait_for_pyscript=False)
         div = self.page.wait_for_selector(".py-error")
-        assert div.text_content() == "Fatal error: config.runtimes is empty"
+        assert (
+            div.text_content() == "(PY1000): Fatal error: config.interpreter is empty"
+        )
 
-    def test_multiple_runtimes(self):
+    def test_multiple_interpreter(self):
         snippet = """
             <py-config type="json">
             {
-                "runtimes": [
+                "interpreters": [
                     {
-                        "src": "https://cdn.jsdelivr.net/pyodide/v0.21.2/full/pyodide.js",
-                        "name": "pyodide-0.21.2",
+                        "src": "https://cdn.jsdelivr.net/pyodide/v0.22.1/full/pyodide.js",
+                        "name": "pyodide-0.22.1",
                         "lang": "python"
                     },
                     {
@@ -194,9 +253,71 @@ class TestConfig(PyScriptTest):
             </py-script>
         """
         self.pyscript_run(snippet)
-        div = self.page.wait_for_selector(".py-error")
+        banner = self.page.wait_for_selector(".py-warning")
         expected = (
-            "Multiple runtimes are not supported yet. Only the first will be used"
+            "Multiple interpreters are not supported yet.Only the first will be used"
         )
-        assert div.text_content() == expected
+        assert banner.text_content() == expected
         assert self.console.log.lines[-1] == "hello world"
+
+    def test_paths(self):
+        self.writefile("a.py", "x = 'hello from A'")
+        self.writefile("b.py", "x = 'hello from B'")
+        self.pyscript_run(
+            """
+            <py-config>
+                [[fetch]]
+                files = ["./a.py", "./b.py"]
+            </py-config>
+
+            <py-script>
+                import js
+                import a, b
+                js.console.log(a.x)
+                js.console.log(b.x)
+            </py-script>
+            """
+        )
+        assert self.console.log.lines[-2:] == [
+            "hello from A",
+            "hello from B",
+        ]
+
+    def test_paths_that_do_not_exist(self):
+        self.pyscript_run(
+            """
+            <py-config>
+                [[fetch]]
+                files = ["./f.py"]
+            </py-config>
+            """,
+            wait_for_pyscript=False,
+        )
+
+        expected = "(PY0404): Fetching from URL ./f.py failed with " "error 404"
+
+        inner_html = self.page.locator(".py-error").inner_html()
+
+        assert expected in inner_html
+        assert expected in self.console.error.lines[-1]
+
+    def test_paths_from_packages(self):
+        self.writefile("utils/__init__.py", "")
+        self.writefile("utils/a.py", "x = 'hello from A'")
+        self.pyscript_run(
+            """
+            <py-config>
+                [[fetch]]
+                from = "utils"
+                to_folder = "pkg"
+                files = ["__init__.py", "a.py"]
+            </py-config>
+
+            <py-script>
+                import js
+                from pkg.a import x
+                js.console.log(x)
+            </py-script>
+            """
+        )
+        assert self.console.log.lines[-1] == "hello from A"

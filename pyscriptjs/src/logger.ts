@@ -10,8 +10,8 @@
        logger.warn('...');
        logger.error('...');
 
-   The logger automatically adds the prefix "[my-prefix]" to all logs; so e.g., the
-   above call would print:
+   The logger automatically adds the prefix "[my-prefix]" to all logs.
+   E.g., the above call would print:
 
        [my-prefix] hello world
 
@@ -24,10 +24,10 @@
 */
 
 interface Logger {
-    debug(message: string, ...args: any[]): void;
-    info(message: string, ...args: any[]): void;
-    warn(message: string, ...args: any[]): void;
-    error(message: string, ...args: any[]): void;
+    debug(message: string, ...args: unknown[]): void;
+    info(message: string, ...args: unknown[]): void;
+    warn(message: string, ...args: unknown[]): void;
+    error(message: string | Error, ...args: unknown[]): void;
 }
 
 const _cache = new Map<string, Logger>();
@@ -42,14 +42,14 @@ function getLogger(prefix: string): Logger {
 }
 
 function _makeLogger(prefix: string): Logger {
-    prefix = "[" + prefix + "] ";
+    prefix = `[${prefix}] `;
 
-    function make(level: string) {
-        const out_fn = console[level].bind(console);
-        function fn(fmt: string, ...args: any[]) {
+    function make(level: 'info' | 'debug' | 'warn' | 'error') {
+        const out_fn = console[level].bind(console) as typeof console.log;
+        function fn(fmt: string, ...args: unknown[]) {
             out_fn(prefix + fmt, ...args);
         }
-        return fn
+        return fn;
     }
 
     // 'log' is intentionally omitted
@@ -58,7 +58,7 @@ function _makeLogger(prefix: string): Logger {
     const warn = make('warn');
     const error = make('error');
 
-    return {debug, info, warn, error};
+    return { debug, info, warn, error };
 }
 
 export { getLogger };

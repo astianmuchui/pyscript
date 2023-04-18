@@ -15,8 +15,9 @@ This document lists the Maintainers of the Project. Maintainers may be added onc
 | Ted Patrick          | Anaconda, Inc    |
 | Jeff Glass           | ---              |
 | Paul Everitt         | ---              |
+| Fabio Rosado         | ---              |
 
-______________________________________________________________________
+---
 
 Part of MVG-0.1-beta.
 Made with love by GitHub. Licensed under the [CC-BY 4.0 License](https://creativecommons.org/licenses/by-sa/4.0/).

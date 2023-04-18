@@ -2,8 +2,8 @@
     margin-bottom: 5rem;
 }
 
-.example h2{
-    color: #000000;
+.example h2 {
+    /* color: #000000; */
     font-family: "Inconsolata", monospace;
     font-size: 2.25rem;
     margin-bottom: 1rem;
@@ -11,10 +11,17 @@
 
 .card {
     height: 15rem;
-    background-color: #FFFFFF;
+    background-color: var(--color-secondary);
     padding: 1rem;
-    -webkit-box-shadow: var(--card-shadow);
-    box-shadow: var(--card-shadow);
+    border-radius: 10px;
+}
+
+.card:hover,
+.card:hover a,
+.card:hover a:visited,
+.card:hover h2 {
+    background-color: var(--color-primary);
+    color: #1d1d22;
 }
 
 .card a h2 {
@@ -24,11 +31,27 @@
     font-size: 2.25rem;
 }
 
+.card a p {
+    color: var(--text-color);
+}
+
+a .card {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
 .card-content {
     height: 100%;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
+}
+
+.card-content a,
+.card-content a:visited {
+    color: var(--color-primary);
 }
 
 .container-card {

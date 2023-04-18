@@ -1,3 +1,7 @@
+import dataclasses
+import functools
+import math
+import os
 import pdb
 import re
 import sys
@@ -8,13 +12,100 @@ from dataclasses import dataclass
 
 import py
 import pytest
+import toml
 from playwright.sync_api import Error as PlaywrightError
 
 ROOT = py.path.local(__file__).dirpath("..", "..", "..")
 BUILD = ROOT.join("pyscriptjs", "build")
 
 
+def params_with_marks(params):
+    """
+    Small helper to automatically apply to each param a pytest.mark with the
+    same name of the param itself. E.g.:
+
+        params_with_marks(['aaa', 'bbb'])
+
+    is equivalent to:
+
+        [pytest.param('aaa', marks=pytest.mark.aaa),
+         pytest.param('bbb', marks=pytest.mark.bbb)]
+
+    This makes it possible to use 'pytest -m aaa' to run ONLY the tests which
+    uses the param 'aaa'.
+    """
+    return [pytest.param(name, marks=getattr(pytest.mark, name)) for name in params]
+
+
+def with_execution_thread(*values):
+    """
+    Class decorator to override config.execution_thread.
+
+    By default, we run each test twice:
+      - execution_thread = 'main'
+      - execution_thread = 'worker'
+
+    If you want to execute certain tests with only one specific values of
+    execution_thread, you can use this class decorator. For example:
+
+    @with_execution_thread('main')
+    class TestOnlyMainThread:
+        ...
+
+    @with_execution_thread('worker')
+    class TestOnlyWorker:
+        ...
+
+    If you use @with_execution_thread(None), the logic to inject the
+    execution_thread config is disabled.
+    """
+
+    if values == (None,):
+
+        @pytest.fixture
+        def execution_thread(self, request):
+            return None
+
+    else:
+        for value in values:
+            assert value in ("main", "worker")
+
+            @pytest.fixture(params=params_with_marks(values))
+            def execution_thread(self, request):
+                return request.param
+
+    def with_execution_thread_decorator(cls):
+        cls.execution_thread = execution_thread
+        return cls
+
+    return with_execution_thread_decorator
+
+
+def skip_worker(reason):
+    """
+    Decorator to skip a test if self.execution_thread == 'worker'
+    """
+    if callable(reason):
+        # this happens if you use @skip_worker instead of @skip_worker("bla bla bla")
+        raise Exception(
+            "You need to specify a reason for skipping, "
+            "please use: @skip_worker('...')"
+        )
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        def decorated(self, *args):
+            if self.execution_thread == "worker":
+                pytest.skip(reason)
+            return fn(self, *args)
+
+        return decorated
+
+    return decorator
+
+
 @pytest.mark.usefixtures("init")
+@with_execution_thread("main", "worker")
 class PyScriptTest:
     """
     Base class to write PyScript integration tests, based on playwright.
@@ -43,12 +134,8 @@ class PyScriptTest:
         creates an HTML page to run the specified snippet.
     """
 
-    # Pyodide always print()s this message upon initialization. Make it
-    # available to all tests so that it's easiert to check.
-    PY_COMPLETE = "Python initialization complete"
-
     @pytest.fixture()
-    def init(self, request, tmpdir, logger, page):
+    def init(self, request, tmpdir, logger, page, execution_thread):
         """
         Fixture to automatically initialize all the tests in this class and its
         subclasses.
@@ -70,18 +157,25 @@ class PyScriptTest:
         tmpdir.join("build").mksymlinkto(BUILD)
         self.tmpdir.chdir()
         self.logger = logger
+        self.execution_thread = execution_thread
 
         if request.config.option.no_fake_server:
             # use a real HTTP server. Note that as soon as we request the
             # fixture, the server automatically starts in its own thread.
             self.http_server = request.getfixturevalue("http_server")
+            self.router = None
+            self.is_fake_server = False
         else:
             # use the internal playwright routing
-            self.http_server = "http://fake_server"
+            self.http_server = "https://fake_server"
             self.router = SmartRouter(
-                "fake_server", logger=logger, usepdb=request.config.option.usepdb
+                "fake_server",
+                cache=request.config.cache,
+                logger=logger,
+                usepdb=request.config.option.usepdb,
             )
             self.router.install(page)
+            self.is_fake_server = True
         #
         self.init_page(page)
         #
@@ -116,6 +210,20 @@ class PyScriptTest:
         self._js_errors = []
         page.on("console", self._on_console)
         page.on("pageerror", self._on_pageerror)
+
+    def run_js(self, code):
+        """
+        allows top level await to be present in the `code` parameter
+        """
+        self.page.evaluate(
+            """(async () => {
+            try {%s}
+            catch(e) {
+                console.error(e);
+            }
+            })();"""
+            % code
+        )
 
     def teardown_method(self):
         # we call check_js_errors on teardown: this means that if there are still
@@ -187,6 +295,7 @@ class PyScriptTest:
         Very thin helper to write a file in the tmpdir
         """
         f = self.tmpdir.join(filename)
+        f.dirpath().ensure(dir=True)
         f.write(content)
 
     def goto(self, path):
@@ -195,24 +304,52 @@ class PyScriptTest:
         url = f"{self.http_server}/{path}"
         self.page.goto(url, timeout=0)
 
-    def wait_for_console(self, text, *, timeout=None, check_js_errors=True):
+    def wait_for_console(
+        self, text, *, match_substring=False, timeout=None, check_js_errors=True
+    ):
         """
-        Wait until the given message appear in the console.
+        Wait until the given message appear in the console. If the message was
+        already printed in the console, return immediately.
 
-        Note: it must be the *exact* string as printed by e.g. console.log.
-        If you need more control on the predicate (e.g. if you want to match a
-        substring), use self.page.expect_console_message directly.
+        By default "text" must be the *exact* string as printed by a single
+        call to e.g. console.log. If match_substring is True, it is enough
+        that the console contains the given text anywhere.
 
         timeout is expressed in milliseconds. If it's None, it will use
-        playwright's own default value, which is 30 seconds).
+        the same default as playwright, which is 30 seconds.
 
         If check_js_errors is True (the default), it also checks that no JS
         errors were raised during the waiting.
+
+        Return the elapsed time in ms.
         """
-        pred = lambda msg: msg.text == text
+        if match_substring:
+
+            def find_text():
+                return text in self.console.all.text
+
+        else:
+
+            def find_text():
+                return text in self.console.all.lines
+
+        if timeout is None:
+            timeout = 30 * 1000
+        # NOTE: we cannot use playwright's own page.expect_console_message(),
+        # because if you call it AFTER the text has already been emitted, it
+        # waits forever. Instead, we have to use our own custom logic.
         try:
-            with self.page.expect_console_message(pred, timeout=timeout):
-                pass
+            t0 = time.time()
+            while True:
+                elapsed_ms = (time.time() - t0) * 1000
+                if elapsed_ms > timeout:
+                    raise TimeoutError(f"{elapsed_ms:.2f} ms")
+                #
+                if find_text():
+                    # found it!
+                    return elapsed_ms
+                #
+                self.page.wait_for_timeout(50)
         finally:
             # raise JsError if there were any javascript exception. Note that
             # this might happen also in case of a TimeoutError. In that case,
@@ -232,17 +369,85 @@ class PyScriptTest:
         If check_js_errors is True (the default), it also checks that no JS
         errors were raised during the waiting.
         """
-        # this is printed by runtime.ts:Runtime.initialize
-        self.wait_for_console(
+        # this is printed by interpreter.ts:Interpreter.initialize
+        elapsed_ms = self.wait_for_console(
             "[pyscript/main] PyScript page fully initialized",
             timeout=timeout,
             check_js_errors=check_js_errors,
+        )
+        self.logger.log(
+            "wait_for_pyscript", f"Waited for {elapsed_ms/1000:.2f} s", color="yellow"
         )
         # We still don't know why this wait is necessary, but without it
         # events aren't being triggered in the tests.
         self.page.wait_for_timeout(100)
 
-    def pyscript_run(self, snippet, *, extra_head="", wait_for_pyscript=True):
+    def _parse_py_config(self, doc):
+        configs = re.findall("<py-config>(.*?)</py-config>", doc, flags=re.DOTALL)
+        configs = [cfg.strip() for cfg in configs]
+        if len(configs) == 0:
+            return None
+        elif len(configs) == 1:
+            return toml.loads(configs[0])
+        else:
+            raise AssertionError("Too many <py-config>")
+
+    def _inject_execution_thread_config(self, snippet, execution_thread):
+        """
+        If snippet already contains a py-config, let's try to inject
+        execution_thread automatically. Note that this works only for plain
+        <py-config> with inline config: type="json" and src="..." are not
+        supported by this logic, which should remain simple.
+        """
+        cfg = self._parse_py_config(snippet)
+        if cfg is None:
+            # we don't have any <py-config>, let's add one
+            py_config_maybe = f"""
+            <py-config>
+                execution_thread = "{execution_thread}"
+            </py-config>
+            """
+        else:
+            cfg["execution_thread"] = execution_thread
+            dumped_cfg = toml.dumps(cfg)
+            new_py_config = f"""
+            <py-config>
+                {dumped_cfg}
+            </py-config>
+            """
+            snippet = re.sub(
+                "<py-config>.*</py-config>", new_py_config, snippet, flags=re.DOTALL
+            )
+            # no need for extra config, it's already in the snippet
+            py_config_maybe = ""
+        #
+        return snippet, py_config_maybe
+
+    def _pyscript_format(self, snippet, *, execution_thread, extra_head=""):
+        if execution_thread is None:
+            py_config_maybe = ""
+        else:
+            snippet, py_config_maybe = self._inject_execution_thread_config(
+                snippet, execution_thread
+            )
+        doc = f"""
+        <html>
+          <head>
+              <link rel="stylesheet" href="{self.http_server}/build/pyscript.css" />
+              <script defer src="{self.http_server}/build/pyscript.js"></script>
+              {extra_head}
+          </head>
+          <body>
+            {py_config_maybe}
+            {snippet}
+          </body>
+        </html>
+        """
+        return doc
+
+    def pyscript_run(
+        self, snippet, *, extra_head="", wait_for_pyscript=True, timeout=None
+    ):
         """
         Main entry point for pyscript tests.
 
@@ -256,26 +461,145 @@ class PyScriptTest:
           - open a playwright page for it
           - wait until pyscript has been fully loaded
         """
-        doc = f"""
-        <html>
-          <head>
-              <link rel="stylesheet" href="{self.http_server}/build/pyscript.css" />
-              <script defer src="{self.http_server}/build/pyscript.js"></script>
-              {extra_head}
-          </head>
-          <body>
-            {snippet}
-          </body>
-        </html>
-        """
+        doc = self._pyscript_format(
+            snippet, execution_thread=self.execution_thread, extra_head=extra_head
+        )
+        if not wait_for_pyscript and timeout is not None:
+            raise ValueError("Cannot set a timeout if wait_for_pyscript=False")
         filename = f"{self.testname}.html"
         self.writefile(filename, doc)
         self.goto(filename)
         if wait_for_pyscript:
-            self.wait_for_pyscript()
+            self.wait_for_pyscript(timeout=timeout)
+
+    def iter_locator(self, loc):
+        """
+        Helper method to iterate over all the elements which are matched by a
+        locator, since playwright does not seem to support it natively.
+        """
+        n = loc.count()
+        elems = [loc.nth(i) for i in range(n)]
+        return iter(elems)
+
+    def assert_no_banners(self):
+        """
+        Ensure that there are no alert banners on the page, which are used for
+        errors and warnings. Raise AssertionError if any if found.
+        """
+        loc = self.page.locator(".alert-banner")
+        n = loc.count()
+        if n > 0:
+            text = "\n".join(loc.all_inner_texts())
+            raise AssertionError(f"Found {n} alert banners:\n" + text)
+
+    def assert_banner_message(self, expected_message):
+        """
+        Ensure that there is an alert banner on the page with the given message.
+        Currently it only handles a single.
+        """
+        banner = self.page.wait_for_selector(".alert-banner")
+        banner_text = banner.inner_text()
+
+        if expected_message not in banner_text:
+            raise AssertionError(
+                f"Expected message '{expected_message}' does not "
+                f"match banner text '{banner_text}'"
+            )
+        return True
+
+    def check_tutor_generated_code(self, modules_to_check=None):
+        """
+        Ensure that the source code viewer injected by the PyTutor plugin
+        is presend. Raise AssertionError if not found.
+
+        Args:
+
+            modules_to_check(str): iterable with names of the python modules
+                                that have been included in the tutor config
+                                and needs to be checked (if they are included
+                                in the displayed source code)
+
+        Returns:
+            None
+        """
+        # Given: a page that has a <py-tutor> tag
+        assert self.page.locator("py-tutor").count()
+
+        # EXPECT that"
+        #
+        # the page has the "view-code-button"
+        view_code_button = self.page.locator("#view-code-button")
+        vcb_count = view_code_button.count()
+        if vcb_count != 1:
+            raise AssertionError(
+                f"Found {vcb_count} code view button. Should have been 1!"
+            )
+
+        # the page has the code-section element
+        code_section = self.page.locator("#code-section")
+        code_section_count = code_section.count()
+        code_msg = (
+            f"One (and only one) code section should exist. Found: {code_section_count}"
+        )
+        assert code_section_count == 1, code_msg
+
+        pyconfig_tag = self.page.locator("py-config")
+        code_section_inner_html = code_section.inner_html()
+
+        # the code_section has the index.html section
+        assert "<p>index.html</p>" in code_section_inner_html
+
+        # the section has the tags highlighting the HTML code
+        assert (
+            '<pre class="prism-code language-html" tabindex="0">'
+            '    <code class="language-html">' in code_section_inner_html
+        )
+
+        # if modules were included, these are also presented in the code section
+        if modules_to_check:
+            for module in modules_to_check:
+                assert f"{module}" in code_section_inner_html
+
+        # the section also includes the config
+        assert "&lt;</span>py-config</span>" in code_section_inner_html
+
+        # the contents of the py-config tag are included in the code section
+        assert pyconfig_tag.inner_html() in code_section_inner_html
+
+        # the code section to be invisible by default (by having the hidden class)
+        assert "code-section-hidden" in code_section.get_attribute("class")
+
+        # once the view_code_button is pressed, the code section becomes visible
+        view_code_button.click()
+        assert "code-section-visible" in code_section.get_attribute("class")
 
 
 # ============== Helpers and utility functions ==============
+
+MAX_TEST_TIME = 30  # Number of seconds allowed for checking a testing condition
+TEST_TIME_INCREMENT = 0.25  # 1/4 second, the length of each iteration
+TEST_ITERATIONS = math.ceil(
+    MAX_TEST_TIME / TEST_TIME_INCREMENT
+)  # 120 iters of 1/4 second
+
+
+def wait_for_render(page, selector, pattern):
+    """
+    Assert that rendering inserts data into the page as expected: search the
+    DOM from within the timing loop for a string that is not present in the
+    initial markup but should appear by way of rendering
+    """
+    re_sub_content = re.compile(pattern)
+    py_rendered = False  # Flag to be set to True when condition met
+
+    for _ in range(TEST_ITERATIONS):
+        content = page.inner_html(selector)
+        if re_sub_content.search(content):
+            py_rendered = True
+            break
+        time.sleep(TEST_TIME_INCREMENT)
+
+    assert py_rendered  # nosec
 
 
 class JsErrors(Exception):
@@ -441,7 +765,7 @@ class Logger:
     def log(self, category, text, *, color=None):
         delta = time.time() - self.start_time
         text = self.colorize_prefix(text, color="teal")
-        line = f"[{delta:6.2f} {category:16}] {text}"
+        line = f"[{delta:6.2f} {category:17}] {text}"
         if color:
             line = Color.set(color, line)
         print(line)
@@ -510,19 +834,23 @@ class SmartRouter:
         headers: dict
         body: str
 
-    # NOTE: this is a class attribute, which means that the cache is
-    # automatically shared between all instances of Fake_Server (and thus all
-    # tests of the pytest session)
-    _cache = {}
+        def asdict(self):
+            return dataclasses.asdict(self)
 
-    def __init__(self, fake_server, *, logger, usepdb=False):
+        @classmethod
+        def fromdict(cls, d):
+            return cls(**d)
+
+    def __init__(self, fake_server, *, cache, logger, usepdb=False):
         """
         fake_server: the domain name of the fake server
         """
         self.fake_server = fake_server
+        self.cache = cache  # this is pytest-cache, it survives across sessions
         self.logger = logger
         self.usepdb = usepdb
         self.page = None
+        self.requests = []  # (status, kind, url)
 
     def install(self, page):
         """
@@ -559,6 +887,7 @@ class SmartRouter:
             route.abort()
 
     def log_request(self, status, kind, url):
+        self.requests.append((status, kind, url))
         color = "blue" if status == 200 else "red"
         self.logger.log("request", f"{status} - {kind} - {url}", color=color)
 
@@ -573,20 +902,48 @@ class SmartRouter:
             self.log_request(200, "fake_server", full_url)
             assert url.path[0] == "/"
             relative_path = url.path[1:]
-            route.fulfill(status=200, path=relative_path)
+            if os.path.exists(relative_path):
+                headers = {
+                    "Cross-Origin-Embedder-Policy": "require-corp",
+                    "Cross-Origin-Opener-Policy": "same-origin",
+                }
+                route.fulfill(status=200, headers=headers, path=relative_path)
+            else:
+                route.fulfill(status=404)
             return
 
         # network requests might be cached
-        if full_url in self._cache:
+        resp = self.fetch_from_cache(full_url)
+        if resp is not None:
             kind = "CACHED"
-            resp = self._cache[full_url]
         else:
             kind = "NETWORK"
             resp = self.fetch_from_network(route.request)
-            self._cache[full_url] = resp
+            self.save_resp_to_cache(full_url, resp)
 
         self.log_request(resp.status, kind, full_url)
         route.fulfill(status=resp.status, headers=resp.headers, body=resp.body)
+
+    def clear_cache(self, url):
+        key = "pyscript/" + url
+        self.cache.set(key, None)
+
+    def save_resp_to_cache(self, url, resp):
+        key = "pyscript/" + url
+        data = resp.asdict()
+        # cache.set encodes it as JSON, and "bytes" are not supported: let's
+        # encode them as latin-1
+        data["body"] = data["body"].decode("latin-1")
+        self.cache.set(key, data)
+
+    def fetch_from_cache(self, url):
+        key = "pyscript/" + url
+        data = self.cache.get(key, None)
+        if data is None:
+            return None
+        # see the corresponding comment in save_resp_to_cache
+        data["body"] = data["body"].encode("latin-1")
+        return self.CachedResponse(**data)
 
     def fetch_from_network(self, request):
         # sometimes the network is flaky and if the first request doesn't

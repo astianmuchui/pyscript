@@ -1,10 +1,12 @@
-import type { Runtime } from '../runtime';
+import type { PyProxy, PyProxyCallable } from 'pyodide';
 import { getLogger } from '../logger';
+import { robustFetch } from '../fetch';
+import { InterpreterClient } from '../interpreter_client';
+import type { Remote } from 'synclink';
 
 const logger = getLogger('py-register-widget');
 
-
-function createWidget(runtime: Runtime, name: string, code: string, klass: string) {
+function createWidget(interpreter: InterpreterClient, name: string, code: string, klass: string) {
     class CustomWidget extends HTMLElement {
         shadow: ShadowRoot;
         wrapper: HTMLElement;
@@ -12,8 +14,8 @@ function createWidget(runtime: Runtime, name: string, code: string, klass: strin
         name: string = name;
         klass: string = klass;
         code: string = code;
-        proxy: any;
-        proxyClass: any;
+        proxy: Remote<PyProxy & { connect(): void }>;
+        proxyClass: Remote<PyProxyCallable>;
 
         constructor() {
             super();
@@ -26,22 +28,22 @@ function createWidget(runtime: Runtime, name: string, code: string, klass: strin
         }
 
         async connectedCallback() {
-            await runtime.runButDontRaise(this.code);
-            this.proxyClass = runtime.globals.get(this.klass);
-            this.proxy = this.proxyClass(this);
-            this.proxy.connect();
-            this.registerWidget();
+            await interpreter.runButDontRaise(this.code);
+            this.proxyClass = (await interpreter.globals.get(this.klass)) as Remote<PyProxyCallable>;
+            this.proxy = (await this.proxyClass(this)) as Remote<PyProxy & { connect(): void }>;
+            await this.proxy.connect();
+            await this.registerWidget();
         }
 
-        registerWidget() {
+        async registerWidget() {
             logger.info('new widget registered:', this.name);
-            runtime.globals.set(this.id, this.proxy);
+            await interpreter.globals.set(this.id, this.proxy);
         }
     }
-    const xPyWidget = customElements.define(name, CustomWidget);
+    customElements.define(name, CustomWidget);
 }
 
-export function make_PyWidget(runtime: Runtime) {
+export function make_PyWidget(interpreter: InterpreterClient) {
     class PyWidget extends HTMLElement {
         shadow: ShadowRoot;
         name: string;
@@ -62,14 +64,14 @@ export function make_PyWidget(runtime: Runtime) {
             this.wrapper = document.createElement('slot');
             this.shadow.appendChild(this.wrapper);
 
-            this.addAttributes('src','name','klass');
+            this.addAttributes('src', 'name', 'klass');
         }
 
-        addAttributes(...attrs:string[]){
-            for (const each of attrs){
-                const property = each === "src" ? "source" : each;
+        addAttributes(...attrs: string[]) {
+            for (const each of attrs) {
+                const property = each === 'src' ? 'source' : each;
                 if (this.hasAttribute(each)) {
-                  this[property]=this.getAttribute(each);
+                    this[property] = this.getAttribute(each);
                 }
             }
         }
@@ -86,11 +88,11 @@ export function make_PyWidget(runtime: Runtime) {
             this.appendChild(mainDiv);
             logger.debug('PyWidget: reading source', this.source);
             this.code = await this.getSourceFromFile(this.source);
-            createWidget(runtime, this.name, this.code, this.klass);
+            createWidget(interpreter, this.name, this.code, this.klass);
         }
 
         async getSourceFromFile(s: string): Promise<string> {
-            const response = await fetch(s);
+            const response = await robustFetch(s);
             return await response.text();
         }
     }
